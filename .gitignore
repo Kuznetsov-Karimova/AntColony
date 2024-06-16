@@ -1,0 +1,17 @@
+build/
+
+*.tmp
+*.log
+*.swp
+
+*.exe
+*.out
+*.o
+
+*.cache
+*.temp
+
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
