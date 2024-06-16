@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <map>
+#include <numeric>
 #include <random>
 #include <set>
 #include <string>
@@ -46,7 +47,7 @@ public:
 
             if (line.find("NAME") != std::string::npos) {
                 continue;
-            } else if (line.find("COMMENT") != std::string::npos) {
+            } else if (line.find("COMMENT") != std::string::npos) { //NOLINT
                 size_t pos1 = line.find("No of trucks: ");
                 size_t pos2 = line.find(", Optimal value:");
                 if (pos1 != std::string::npos && pos2 != std::string::npos) {
@@ -57,6 +58,7 @@ public:
             } else if (line.find("DIMENSION") != std::string::npos) {
                 iss >> key >> key >> DIMENSION;
                 demands.resize(DIMENSION+1);
+                nodes.resize(DIMENSION + 1);
             } else if (line.find("CAPACITY") != std::string::npos) {
                 iss >> key >> key >> CAPACITY;
             } else if (line.find("NODE_COORD_SECTION") != std::string::npos) {
@@ -65,7 +67,7 @@ public:
                     iss.clear();
                     iss.str(line);
                     iss >> node.id >> node.x >> node.y;
-                    nodes.push_back(node);
+                    nodes[node.id] = node;
                 }
             }
 
@@ -89,8 +91,9 @@ public:
     }
 
     void intialize_matricies() {
-        adjacency_matrix.resize(DIMENSION, std::vector<double>(DIMENSION, 0.0));
-        pheromone_matrix.resize(DIMENSION, std::vector<double>(DIMENSION, 1.0));
+        std::cout << "a" << std::endl;
+        adjacency_matrix.resize(DIMENSION + 1, std::vector<double>(DIMENSION + 1, 0.0));
+        pheromone_matrix.resize(DIMENSION + 1, std::vector<double>(DIMENSION + 1, 1.0));
         for (int i = 1; i < DIMENSION + 1; ++i) {
             for (int j = i + 1; j < DIMENSION + 1; ++j) {
                 double distance = euclidean_distance(nodes[i], nodes[j]);
@@ -98,41 +101,49 @@ public:
                 adjacency_matrix[j][i] = distance;
             }
         }
+        std::cout << "Sucses intialize matricies" << std::endl;
     }
 
-    [[nodiscard]] auto get_distance(int from, int to) const -> double {
-        return adjacency_matrix[from][to];
+    void update_pheromone_map(const std::vector<std::pair<std::vector<std::vector<int>>, double>>& solutions) {
+        for (size_t i = 1; i < pheromone_matrix.size(); ++i) {
+            for (size_t j = i + 1; j < pheromone_matrix.size(); ++j) {
+                pheromone_matrix[i][j] = std::max((1 - EVAPORATION) * pheromone_matrix[i][j], 1e-10);
+                pheromone_matrix[j][i] = pheromone_matrix[i][j];
+            }
+        }
+
+        for (const auto& solution : solutions) {
+            double pheromone_increase = 1.0 / solution.second;
+            for (const auto& route : solution.first) {
+                for (size_t i = 0; i < route.size() - 1; ++i) {
+                    int from = route[i];
+                    int to = route[i + 1];
+                    pheromone_matrix[from][to] += pheromone_increase;
+                    pheromone_matrix[to][from] += pheromone_increase;
+                }
+            }
+        }
     }
 
-    [[nodiscard]] auto get_pheromone(int from, int to) const -> double {
-        return pheromone_matrix[from][to];
+    void global_update_pheromone_map(const std::pair<std::vector<std::vector<int>>, double>& ant_solution, double capacity) {
+        for (size_t i = 1; i < pheromone_matrix.size(); ++i) {
+            for (size_t j = i + 1; j < pheromone_matrix.size(); ++j) {
+                pheromone_matrix[i][j] = std::max((1 - EVAPORATION) * pheromone_matrix[i][j], 1e-10);
+                pheromone_matrix[j][i] = pheromone_matrix[i][j];
+            }
+        }
+
+        double pheromone_increase = capacity / ant_solution.second;
+        for (const auto& route : ant_solution.first) {
+            for (size_t i = 0; i < route.size() - 1; ++i) {
+                int from = route[i];
+                int to = route[i + 1];
+                pheromone_matrix[from][to] += pheromone_increase;
+                pheromone_matrix[to][from] += pheromone_increase;
+            }
+        }
     }
 
-    void add_pheromone(int from, int to, double amount) {
-        pheromone_matrix[from][to] += amount;
-    }
-
-    void evaporate_pheromone(int from, int to, double evaporation_rate) {
-        pheromone_matrix[from][to] *= (1.0 - evaporation_rate);
-    }
-
-    [[nodiscard]] auto get_demand(int node) const -> int {
-        return demands[node];
-    }
-
-    [[nodiscard]] auto get_dimension() const -> int {
-        return DIMENSION;
-    }
-
-    [[nodiscard]] auto get_capacity() const -> int {
-        return CAPACITY;
-    }
-
-    void initialize_pheromone_matrix() {
-        pheromone_matrix.resize(DIMENSION + 1, std::vector<double>(DIMENSION + 1, 1.0));
-    }
-
-private:
     double ALPHA;
     double BETA;
     double EVAPORATION;
@@ -152,185 +163,199 @@ private:
 
 class Ant {
 public:
-    Ant(VRP& graph, int capacity, double alpha, double beta)
-        : graph(graph), ant_capacity(capacity), alpha(alpha), beta(beta) {
+    explicit Ant(VRP& data)
+        : p_data(data){
         reset_state();
     }
 
-    auto find_solution() -> std::vector<std::vector<int>> {
-        start_new_route();
-        while (!cities_left.empty()) {
-            int current_city = routes.back().back();
-            int next_city = select_next_city(current_city);
-            if (next_city == -1) {
-                move_to_city(current_city, 1); // move to depot
-                start_new_route();
-            } else {
-                move_to_city(current_city, next_city);
+    auto select_next_point(int current_point) -> int {
+        std::vector<int> available_points;
+        for (int point : points_left) {
+            if (capacity >= p_data.demands[point]) {
+                available_points.push_back(point);
             }
         }
-        move_to_city(routes.back().back(), 1); // complete last route
-        return routes;
+
+        if (available_points.empty()) {
+            return -1;
+        }
+
+        std::vector<double> scores;
+        for (int point : available_points) {
+            double score = std::pow(p_data.pheromone_matrix[current_point][point], p_data.ALPHA) *
+                           std::pow(1.0 / (p_data.adjacency_matrix[current_point][point] + 1e-10), p_data.BETA);
+            scores.push_back(score);
+        }
+
+        double denominator = std::accumulate(scores.begin(), scores.end(), 0.0);
+        std::vector<double> probabilities;
+        for (double score : scores) {
+            probabilities.push_back(score / denominator);
+        }
+
+        std::discrete_distribution<int> distribution(probabilities.begin(), probabilities.end());
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        int next_point = available_points[distribution(gen)];
+
+        return next_point;
+    }
+
+    void move_to_point(int current_point, int next_point) {
+        routes.back().push_back(current_point);
+        if (next_point != 1) {
+            points_left.erase(next_point);
+        }
+        capacity -= p_data.demands[next_point];
+        total_path += p_data.adjacency_matrix[current_point][next_point];
+    }
+
+    void start_new_route() {
+        capacity = p_data.CAPACITY;
+        routes.push_back({1});
+
+        std::vector<int> possible_points;
+        for (int point : points_left) {
+            if (capacity >= p_data.demands[point]) {
+                possible_points.push_back(point);
+            }
+        }
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, static_cast<int>(possible_points.size()) - 1);
+        int first_point = possible_points[dis(gen)];
+        move_to_point(1, first_point);
+    }
+
+    auto find_solution() -> std::pair<std::vector<std::vector<int>>, double> {
+        start_new_route();
+
+        while (!points_left.empty()) {
+            int current_point = routes.back().back();
+            int next_point = select_next_point(current_point);
+            if (next_point == -1) {
+                move_to_point(current_point, 1);
+                start_new_route();
+            } else {
+                move_to_point(current_point, next_point);
+            }
+        }
+
+        move_to_point(routes.back().back(), 1);
+
+        return {routes, total_path};
     }
 
     void reset_state() {
-        capacity = ant_capacity;
-        cities_left.clear();
-        for (int i = 2; i <= graph.get_dimension(); ++i) {
-            cities_left.insert(i);
+        capacity = p_data.CAPACITY;
+        points_left.clear();
+        for (size_t i = 1; i < p_data.DIMENSION + 1; ++i) {
+            points_left.insert(static_cast<int>(i));
         }
+        points_left.erase(1);
         routes.clear();
-        total_path_cost = 0;
-    }
-
-    [[nodiscard]] auto get_total_path_cost() const -> double {
-        return total_path_cost;
+        total_path = 0.0;
     }
 
 private:
-    VRP& graph;
-    int ant_capacity;
-    double alpha;
-    double beta;
-
+    VRP& p_data;
     int capacity;
-    std::set<int> cities_left;
+    std::set<int> points_left;
     std::vector<std::vector<int>> routes;
-    double total_path_cost;
-
-    void start_new_route() {
-        capacity = ant_capacity;
-        routes.emplace_back(1, 1);
-        int first_city = select_random_city();
-        move_to_city(1, first_city);
-    }
-
-    auto select_random_city() -> int {
-        std::vector<int> available_cities;
-        for (int city : cities_left) {
-            if (capacity >= graph.get_demand(city)) {
-                available_cities.push_back(city);
-            }
-        }
-        if (available_cities.empty()) { return -1; }
-
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(0, available_cities.size() - 1);
-        return available_cities[dis(gen)];
-    }
-
-    auto select_next_city(int current_city) -> int {
-        std::vector<int> available_cities;
-        std::vector<double> probabilities;
-        double total_pheromone = 0.0;
-
-        for (int city : cities_left) {
-            if (capacity >= graph.get_demand(city)) {
-                double pheromone = std::pow(graph.get_pheromone(current_city, city), alpha);
-                double heuristic = std::pow(1.0 / (graph.get_distance(current_city, city) + 1e-10), beta);
-                double score = pheromone * heuristic;
-                available_cities.push_back(city);
-                probabilities.push_back(score);
-                total_pheromone += score;
-            }
-        }
-
-        if (available_cities.empty()) { return -1; }
-
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::discrete_distribution<> dis(probabilities.begin(), probabilities.end());
-
-        return available_cities[dis(gen)];
-    }
-
-    void move_to_city(int current_city, int next_city) {
-        routes.back().push_back(next_city);
-        if (next_city != 1) { cities_left.erase(next_city); }
-        capacity -= graph.get_demand(next_city);
-        total_path_cost += graph.get_distance(current_city, next_city);
-    }
+    double total_path;
 };
 
 
-class AntColonyOptimization {
+class AntColony {
 public:
-    AntColonyOptimization(VRP& data, int num_ants, int num_iterations, double alpha, double beta, double evaporation)
-        : data(data), num_ants(num_ants), num_iterations(num_iterations), alpha(alpha), beta(beta), evaporation(evaporation) {
-        initialize_pheromone_matrix();
+    AntColony() = default;
+
+    static auto get_route_cost(const std::vector<int>& route, const VRP& data) -> double {
+        double total_cost = 0.0;
+        for (size_t i = 0; i < route.size() - 1; ++i) {
+            total_cost += data.adjacency_matrix[route[i]][route[i + 1]];
+        }
+        return total_cost;
     }
 
-    void run() {
-        for (int iteration = 0; iteration < num_iterations; ++iteration) {
-            std::vector<std::vector<std::vector<int>>> all_solutions;
-            std::vector<double> all_costs;
+    auto get_route_cost_with_(const std::vector<int>& route, const VRP& data) -> double {
+        double depot_costs = data.adjacency_matrix[1][route[0]] + data.adjacency_matrix[route.back()][1];
+        return depot_costs + get_route_cost(route, data);
+    }
 
-            for (int i = 0; i < num_ants; ++i) {
-                Ant ant(data, data.get_capacity(), alpha, beta);
-                std::vector<std::vector<int>> solution = ant.find_solution();
-                double cost = ant.get_total_path_cost();
-                all_solutions.push_back(solution);
-                all_costs.push_back(cost);
-                update_pheromones(solution, cost);
-            }
-
-            evaporate_pheromones();
-            auto min_cost_it = std::min_element(all_costs.begin(), all_costs.end());
-            double min_cost = *min_cost_it;
-            std::vector<std::vector<int>> best_solution = all_solutions[std::distance(all_costs.begin(), min_cost_it)];
-
-            if (min_cost < best_tour_length) {
-                best_tour_length = min_cost;
-                best_tour = best_solution;
-            }
-
-            std::cout << "Iteration " << iteration + 1 << ": Best tour length = " << best_tour_length << std::endl;
+    auto find_solution(VRP& vrp, bool verbose = true) -> std::pair<std::vector<std::vector<int>>, double> {
+        std::vector<Ant> ants;
+        for (int i = 0; i < vrp.NUMBER_OF_TRUCKS; ++i) {
+            ants.emplace_back(vrp);
         }
 
-        print_best_tour();
+        std::pair<std::vector<std::vector<int>>, double> best_solution;
+        double best_cost = std::numeric_limits<double>::max();
+        int tolerance = 0;
+
+        for (int iter = 1; iter <= vrp.ITERATIONS_NUM; ++iter) {
+            for (auto& ant : ants) {
+                ant.reset_state();
+            }
+
+            std::vector<std::pair<std::vector<std::vector<int>>, double>> solutions;
+            for (auto& ant : ants) {
+                solutions.push_back(ant.find_solution());
+            }
+
+            auto candidate_best_solution = *std::min_element(solutions.begin(), solutions.end(), 
+                [](const auto& lhs, const auto& rhs) {
+                    return lhs.second < rhs.second;
+                });
+
+            vrp.update_pheromone_map(solutions);
+            vrp.global_update_pheromone_map(candidate_best_solution, vrp.CAPACITY);
+
+            if (candidate_best_solution.second < best_cost) {
+                best_solution = candidate_best_solution;
+                best_cost = candidate_best_solution.second;
+                tolerance = 0;
+            } else {
+                tolerance += 1;
+            }
+
+            if (verbose && iter % 100 == 0) {
+                std::cout << "Best solution in iteration " << iter << "/" << vrp.ITERATIONS_NUM << " = " << best_cost << std::endl;
+            }
+
+            if (tolerance >= static_cast<int>(0.3 * vrp.ITERATIONS_NUM)) {
+                if (verbose) {
+                    std::cout << "---" << std::endl;
+                    std::cout << "Final best solution:" << std::endl;
+                    std::cout << best_cost << std::endl;
+                    for (const auto& route : best_solution.first) {
+                        for (int node : route) {
+                            std::cout << node << " ";
+                        }
+                        std::cout << std::endl;
+                    }
+                }
+                return best_solution;
+            }
+        }
+
+        if (verbose) {
+            std::cout << "---" << std::endl;
+            std::cout << "Final best solution:" << std::endl;
+            std::cout << best_cost << std::endl;
+            for (const auto& route : best_solution.first) {
+                for (int node : route) {
+                    std::cout << node << " ";
+                }
+                std::cout << std::endl;
+            }
+        }
+
+        return best_solution;
     }
 
 private:
-    VRP& data;
-    int num_ants;
-    int num_iterations;
-    double alpha;
-    double beta;
-    double evaporation;
-    double best_tour_length = std::numeric_limits<double>::max();
-    std::vector<std::vector<int>> best_tour;
-
-    void initialize_pheromone_matrix() {
-        data.initialize_pheromone_matrix();
-    }
-
-    void update_pheromones(const std::vector<std::vector<int>>& solution, double cost) {
-        double pheromone_deposit = 1.0 / cost;
-        for (const auto& route : solution) {
-            for (size_t i = 0; i < route.size() - 1; ++i) {
-                int from = route[i];
-                int to = route[i + 1];
-                data.add_pheromone(from, to, pheromone_deposit);
-            }
-        }
-    }
-
-    void evaporate_pheromones() {
-        for (int i = 1; i <= data.get_dimension(); ++i) {
-            for (int j = 1; j <= data.get_dimension(); ++j) {
-                data.evaporate_pheromone(i, j, evaporation);
-            }
-        }
-    }
-
-    void print_best_tour() {
-        std::cout << "Best tour length: " << best_tour_length << std::endl;
-        for (const auto& route : best_tour) {
-            for (int node : route) {
-                std::cout << node << " ";
-            }
-            std::cout << std::endl;
-        }
-    }
+    std::vector<std::vector<int>> routes;
+    double cost = 0.0;
 };
